@@ -220,6 +220,8 @@ form .seg:first-child{margin-top:0}
 .xswap{display:flex;justify-content:center;margin:-10px 0;position:relative;z-index:1}
 .xswap button{width:40px;height:40px;border-radius:50%;background:var(--em);color:var(--gold-soft);display:grid;place-items:center;transform:rotate(90deg);border:3px solid var(--bg)}
 .xinfo{margin-top:12px;padding:10px 14px}
+.kurs{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--em);font-weight:600;font-size:13.5px;text-decoration:none}
+.kurs svg{width:17px;height:17px}
 .xbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .item .a.ex{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15}
 .item .a.ex b{font-weight:600;color:var(--em)}

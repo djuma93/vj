@@ -58,7 +58,7 @@ const LETTERS = [
   ['Маршрут для руководителя', 'Маршрут: [город], [даты]\n\n✈ Вылет: [дата, время], рейс [номер], терминал [ ]\n🏨 Отель: [название], [адрес], бронь № [ ]\n🚘 Трансфер: [время], водитель [имя, телефон]\n\nВстречи:\n— [дата, время] · [с кем] · [адрес]\n— [дата, время] · [с кем] · [адрес]\n\n✈ Обратно: [дата, время], рейс [номер]'],
   ['Благодарность партнёру', 'Добрый день, [имя]!\n\nБлагодарю за встречу и продуктивное обсуждение. Как договорились, направляю [материалы / следующие шаги]:\n— [пункт 1]\n— [пункт 2]\n\nБудем рады продолжить сотрудничество.\n\nС уважением,\nВиолетта']
 ];
-const fresh = () => ({ v: 2, profile: { name: 'Виолетта', currency: '₽', extra: ['$', '€'], budget: 0, pin: null, ready: false }, ops: [], tasks: [], trips: [], decks: [], templates: LETTERS.map(([title, body]) => ({ id: uid(), title, body })), recon: [], closed: {}, log: [] });
+const fresh = () => ({ v: 2, profile: { name: 'Виолетта', currency: '₸', extra: ['$', '€', '₽'], budget: 0, pin: null, ready: false }, ops: [], tasks: [], trips: [], decks: [], templates: LETTERS.map(([title, body]) => ({ id: uid(), title, body })), recon: [], closed: {}, log: [] });
 let S = fresh();
 let saveT; const save = () => { clearTimeout(saveT); saveT = setTimeout(() => DB.set('state', S), 150); if (window.Cloud) Cloud.touch(); };
 const ui = { tab: 'home', fin: 'ops', filter: 'all', month: today().slice(0, 7), q: '', as: 'list', day: null, deck: null };
@@ -129,6 +129,8 @@ function parseQuick(text) {
     else if (/^сня/.test(l)) r.type = 'transfer';
     else if (/^(обмен|поменя|купила?\s*вал)/.test(l)) r.type = 'exchange';
     else if (/^верну/.test(l)) r.type = 'return';
+    else if (/^(₸|тенге|тг|kzt)$/.test(l) && curs().includes('₸')) r.cur = '₸';
+    else if (/^(₽|руб|rub)/.test(l) && curs().includes('₽')) r.cur = '₽';
     else if (/^(\$|дол|бакс|usd)/.test(l) && curs().includes('$')) r.cur = '$';
     else if (/^(€|евро|eur)/.test(l) && curs().includes('€')) r.cur = '€';
     else if (!/^(от|на|в|за)$/.test(l)) rest.push(w);
@@ -283,6 +285,7 @@ function taskRow(x) {
 }
 function nudges() {
   const n = [], t = today(), last = S.recon[S.recon.length - 1];
+  if (S.profile.currency !== '₸' && !S.kzAsked) n.push(['wallet', 'Валюта', `основная ${S.profile.currency}, для Алматы ₸`, 'kzCur']);
   if (S.ops.length && (!last || (Date.now() - new Date(last.date + 'T12:00')) / 864e5 > 7)) n.push(['swap', 'Сверка', last ? 'больше недели назад' : 'сверьте остаток с банком', 'recon']);
   const pm = shiftMonth(t.slice(0, 7), -1);
   if (!S.closed[pm] && S.ops.some(o => o.date.slice(0, 7) === pm)) n.push(['archive', 'Закрыть месяц', monthName(pm), 'archive']);
@@ -451,7 +454,7 @@ function onboarding() {
   <form data-form="start">
     <label class="f"><span>Как к вам обращаться</span><input type="text" name="name" value="Виолетта"></label>
     <div class="flabel" style="margin-top:14px">Основная валюта</div>
-    <div class="seg">${['₽', '₸', '$', '€', 'AED'].map((c, i) => `<label><input type="radio" name="cur" value="${c}" ${i ? '' : 'checked'}><span>${c}</span></label>`).join('')}</div>
+    <div class="seg">${['₸', '$', '€', '₽', 'AED'].map((c, i) => `<label><input type="radio" name="cur" value="${c}" ${i ? '' : 'checked'}><span>${c}</span></label>`).join('')}</div>
     <div class="sec"><h2>Сколько денег сейчас</h2></div>
     <div class="row"><label class="f" style="margin:0"><span>Карта: компании</span><input type="text" inputmode="decimal" name="cc" placeholder="0"></label><label class="f" style="margin:0"><span>Карта: личные</span><input type="text" inputmode="decimal" name="cp" placeholder="0"></label></div>
     <div class="row" style="margin-top:12px"><label class="f" style="margin:0"><span>Наличные: компании</span><input type="text" inputmode="decimal" name="nc" placeholder="0"></label><label class="f" style="margin:0"><span>Наличные: личные</span><input type="text" inputmode="decimal" name="np" placeholder="0"></label></div>
@@ -501,13 +504,15 @@ function xUpdate() {
   const f = $('form[data-form=exch]'), box = $('#xinfo'); if (!f || !box) return;
   const a = num(f.amount.value), b = num(f.toAmount.value), from = f.cur.value, to = f.toCur.value;
   if (from === to) { box.innerHTML = '<p class="red">Выберите разные валюты</p>'; return; }
-  const mk = rateOf(from, to), cb = rateOf(from, to, 'cb'), mine = a > 0 && b > 0 ? b / a : null, R = S.rates || {};
+  const rub = code(from) === 'RUB' || code(to) === 'RUB', kzt = code(from) === 'KZT' || code(to) === 'KZT';
+  const mk = rateOf(from, to), cb = rub ? rateOf(from, to, 'cb') : null, mine = a > 0 && b > 0 ? b / a : null, R = S.rates || {};
   const diff = mine && mk ? (mine / mk - 1) * 100 : null;
   box.innerHTML = `${mine ? `<div class="kv"><span>Ваш курс</span><b>${rateText(mine, from, to)}</b></div>` : ''}
     <div class="kv"><span>Рыночный</span><b>${rateText(mk, from, to)}</b></div>
     ${cb ? `<div class="kv"><span>ЦБ РФ${R.cbAt ? ' на ' + new Date(R.cbAt).toLocaleDateString('ru-RU') : ''}</span><b>${rateText(cb, from, to)}</b></div>` : ''}
     ${diff !== null ? `<div class="kv"><span>Разница с рынком</span><b class="${diff < -1.5 ? 'red' : ''}">${diff > 0 ? '+' : ''}${diff.toFixed(2).replace('.', ',')}%${a ? ' · ' + (diff < 0 ? 'потеря ' : 'выгода ') + fmt(Math.abs(b - a * mk), to) : ''}</b></div>` : ''}
     <div class="xbtns">${mk && a ? `<button type="button" class="btn ghost sm" data-a="xFill" data-src="mk">По рынку</button>` : ''}${cb && a ? `<button type="button" class="btn ghost sm" data-a="xFill" data-src="cb">По ЦБ</button>` : ''}<button type="button" class="btn ghost sm" data-a="xRefresh">${ic('swap')} Обновить</button></div>
+    ${kzt ? `<a class="kurs" href="https://kurs.kz/" target="_blank" rel="noopener">${ic('search')} Курсы обменников Алматы на kurs.kz</a>` : ''}
     <p class="note" style="margin-top:6px">${R.mkAt ? 'Рынок: ' + new Date(R.mkAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) + ', open.er-api.com. ' : 'Курсы недоступны без интернета. '}Введите сумму, которую реально получили: она и попадёт в учёт.</p>`;
 }
 function opSheet(o = {}) {
@@ -696,6 +701,9 @@ const A = {
   async copyTpl(d) { const x = S.templates.find(t => t.id === d.id); try { await navigator.clipboard.writeText(x.body); toast('Текст скопирован'); } catch (e) { toast('Не удалось скопировать'); } },
   key(d) { lockKey(d.k); },
   exchange() { exchangeSheet(); },
+  kzCur() { sheet(`<h2>Основная валюта</h2><p class="lead">Сейчас основная валюта ${esc(S.profile.currency)}. В ней считаются итоги, бюджет и аналитика. Для жизни в Алматы удобнее тенге.</p><div class="row" style="margin-top:16px"><button class="btn" data-a="kzSet">Сделать ₸ основной</button><button class="btn ghost" data-a="kzKeep">Оставить ${esc(S.profile.currency)}</button></div>`); },
+  kzKeep() { S.kzAsked = true; save(); closeSheet(); render(); },
+  kzSet() { const fd = new FormData(); fd.set('name', S.profile.name); fd.set('cur', '₸'); fd.set('extra', ['$', '€', '₽', ...(S.profile.extra || [])].filter((c, i, a) => c !== '₸' && a.indexOf(c) === i).join(', ')); F.profile(fd); },
   xFlip() { const f = $('form[data-form=exch]'); const c = f.cur.value; f.cur.value = f.toCur.value; f.toCur.value = c; const a = f.amount.value; f.amount.value = f.toAmount.value; f.toAmount.value = a; xUpdate(); },
   xFill(d) { const f = $('form[data-form=exch]'), r = rateOf(f.cur.value, f.toCur.value, d.src); if (r) { f.toAmount.value = String(Math.round(num(f.amount.value) * r * 100) / 100).replace('.', ','); xUpdate(); } },
   async xRefresh() { toast('Обновляю курсы…'); await getRates(true); xUpdate(); render(); toast(S.rates && S.rates.mk ? 'Курсы обновлены' : 'Нет связи с сервером курсов'); },
@@ -705,6 +713,7 @@ const A = {
 const F = {
   start(fd) {
     S.profile.name = fd.get('name').trim() || 'Виолетта'; S.profile.currency = fd.get('cur'); S.profile.ready = true;
+    S.profile.extra = ['₸', '$', '€', '₽'].filter(c => c !== S.profile.currency);
     [['cc', 'card', 'company'], ['cp', 'card', 'personal'], ['nc', 'cash', 'company'], ['np', 'cash', 'personal']].forEach(([k, account, owner]) => { const a = num(fd.get(k)); if (a > 0) S.ops.push({ id: uid(), type: 'income', date: today(), amount: a, account, owner, note: 'Начальный остаток', createdAt: new Date().toISOString() }); });
     log('Начало учёта'); save(); render();
   },
@@ -748,7 +757,12 @@ const F = {
     const line = (t, d, acc) => d ? `<div class="card"><h3>${t}: ${d > 0 ? 'лишние' : 'не хватает'} ${fmt(Math.abs(d))}</h3><p>${d > 0 ? 'Вероятно, не внесено поступление.' : 'Вероятно, не внесён расход.'}</p><button class="btn sm" style="margin-top:12px" data-a="fix" data-acc="${acc}" data-d="${d}">Внести операцию</button></div>` : '';
     sheet(`<h2>${dCard || dCash ? 'Есть расхождение' : 'Всё сошлось'}</h2>${dCard || dCash ? line('Карта', dCard, 'card') + line('Наличные', dCash, 'cash') : '<div class="card"><p>Учёт совпадает с фактическими остатками.</p></div>'}<button class="btn ghost" style="margin-top:14px" data-a="closeSheet">Готово</button>`);
   },
-  profile(fd) { S.profile.name = fd.get('name').trim() || S.profile.name; S.profile.currency = fd.get('cur').trim() || S.profile.currency; S.profile.extra = fd.get('extra').split(',').map(s => s.trim()).filter(Boolean); save(); closeSheet(); render(); },
+  profile(fd) {
+    S.profile.name = fd.get('name').trim() || S.profile.name;
+    const oldC = S.profile.currency, newC = fd.get('cur').trim() || oldC, bare = S.ops.filter(o => !o.cur);
+    if (newC !== oldC && bare.length && !confirm(`Основная валюта меняется с ${oldC} на ${newC}.\n\nОК: все прежние суммы на самом деле были в ${newC}, считать их в ${newC}.\nОтмена: прежние суммы были в ${oldC}, оставить их в ${oldC}.`)) bare.forEach(o => { o.cur = oldC; });
+    if (newC !== oldC) { log(`Основная валюта: ${oldC} → ${newC}`); S.kzAsked = true; }
+    S.profile.currency = newC; S.profile.extra = fd.get('extra').split(',').map(s => s.trim()).filter(Boolean); save(); closeSheet(); render(); },
   budget(fd) { S.profile.budget = num(fd.get('b')); save(); closeSheet(); render(); toast(S.profile.budget ? 'Бюджет сохранён' : 'Бюджет отключён'); },
   async pin(fd) { const p = fd.get('pin'); if (!/^\d{4}$/.test(p)) return toast('Нужно 4 цифры'); S.profile.pin = await sha('vj:' + p); save(); closeSheet(); render(); toast('PIN установлен'); },
   task(fd) { const title = fd.get('title').trim(); if (!title) return toast('Введите название'); const id = fd.get('id'); let x = S.tasks.find(t => t.id === id); if (!x) { x = { id: uid(), done: false }; S.tasks.push(x); } Object.assign(x, { title, due: fd.get('due'), time: fd.get('time'), cat: fd.get('cat') || '', important: !!fd.get('imp'), note: fd.get('note').trim() }); save(); closeSheet(); render(); },
