@@ -66,12 +66,37 @@ const ui = { tab: 'home', fin: 'ops', filter: 'all', month: today().slice(0, 7),
 /* ================= money model ================= */
 const CAT_C = ['Билеты', 'Отель', 'Такси и транспорт', 'Представительские', 'Офис и канцелярия', 'Подарки', 'Курьер и доставка', 'Прочее'];
 const CAT_P = ['Продукты', 'Кафе', 'Транспорт', 'Покупки', 'Здоровье', 'Красота', 'Дом', 'Прочее'];
-const TYPE = { expense: 'Расход', income: 'Поступление', transfer: 'Перевод', return: 'Возврат компании' };
+const TYPE = { expense: 'Расход', income: 'Поступление', transfer: 'Перевод', return: 'Возврат компании', exchange: 'Обмен валюты' };
+/* ---- курсы валют ---- */
+const ISO = { '₽': 'RUB', '$': 'USD', '€': 'EUR', '₸': 'KZT', '£': 'GBP', '¥': 'CNY', '₺': 'TRY', '₾': 'GEL', '֏': 'AMD', '₴': 'UAH', 'сум': 'UZS' };
+const code = c => ISO[c] || (/^[A-Za-z]{3}$/.test(c || '') ? c.toUpperCase() : null);
+let ratesBusy = null;
+function getRates(force) {
+  const R = S.rates; if (!force && R && Date.now() - R.at < 2 * 3600e3) return Promise.resolve(R);
+  if (ratesBusy) return ratesBusy;
+  ratesBusy = (async () => {
+    const next = { ...(S.rates || {}) };
+    try { const j = await fetch('https://open.er-api.com/v6/latest/USD', { cache: 'no-store' }).then(x => x.json()); if (j.result === 'success') { next.mk = j.rates; next.mkAt = j.time_last_update_unix * 1000; } } catch (e) { }
+    try { const c = await fetch('https://www.cbr-xml-daily.ru/daily_json.js', { cache: 'no-store' }).then(x => x.json()); const v = { RUB: 1 }; Object.values(c.Valute).forEach(x => v[x.CharCode] = x.Value / x.Nominal); next.cb = v; next.cbAt = c.Date; } catch (e) { }
+    if (next.mk || next.cb) { next.at = Date.now(); S.rates = next; DB.set('state', S); }
+    ratesBusy = null; return S.rates;
+  })();
+  return ratesBusy;
+}
+// сколько единиц `to` за 1 единицу `from`
+function rateOf(from, to, src = 'mk') {
+  const R = S.rates, a = code(from), b = code(to); if (!R || !a || !b || a === b) return a && a === b ? 1 : null;
+  if (src === 'mk') return R.mk && R.mk[a] && R.mk[b] ? R.mk[b] / R.mk[a] : null;
+  return R.cb && R.cb[a] && R.cb[b] ? R.cb[a] / R.cb[b] : null;
+}
+const nf4 = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 4 });
+const rateText = (r, from, to) => !r ? '—' : r >= 1 ? `1 ${from} = ${nf4.format(+r.toPrecision(6))} ${to}` : `1 ${to} = ${nf4.format(+(1 / r).toPrecision(6))} ${from}`;
 const OWN = { company: 'Компания', personal: 'Личные' };
 const ACC = { card: 'Карта', cash: 'Наличные' };
 function balances(ops = S.ops, cur = S.profile.currency) {
   const b = { card: { company: 0, personal: 0 }, cash: { company: 0, personal: 0 } };
   for (const o of ops) {
+    if (o.type === 'exchange') { if (oc(o) === cur) b[o.account][o.owner] -= o.amount; if (o.toCur === cur) b[o.toAccount || o.account][o.owner] += o.toAmount; continue; }
     if (oc(o) !== cur) continue;
     if (o.type === 'income') b[o.account][o.owner] += o.amount;
     else if (o.type === 'transfer') { b[o.account][o.owner] -= o.amount; b[o.toAccount][o.owner] += o.amount; }
@@ -81,11 +106,13 @@ function balances(ops = S.ops, cur = S.profile.currency) {
   b.cardT = b.card.company + b.card.personal; b.cashT = b.cash.company + b.cash.personal;
   return b;
 }
-const accText = o => o.type === 'transfer' ? ACC[o.account] + ' → ' + ACC[o.toAccount] : ACC[o.account];
-const opTitle = o => o.note || o.category || (o.type === 'transfer' ? (o.account === 'card' ? 'Снятие наличных' : 'Внесение на карту') : o.type === 'income' ? (o.owner === 'company' ? 'От компании' : 'Личный доход') : TYPE[o.type]);
-const opSign = o => o.type === 'income' ? 1 : o.type === 'transfer' ? 0 : -1;
-const describe = o => `${dmy(o.date)} · ${TYPE[o.type]} · ${nf.format(o.amount)} ${oc(o)} · ${OWN[o.owner]} · ${accText(o)}${o.category ? ' · ' + o.category : ''}${o.note ? ' · ' + o.note : ''}${o.receipt ? ' · чек' : ''}`;
-const log = t => { S.log.push({ at: new Date().toISOString(), t }); };
+const accText = o => o.type === 'transfer' || (o.type === 'exchange' && o.toAccount && o.toAccount !== o.account) ? ACC[o.account] + ' → ' + ACC[o.toAccount] : ACC[o.account];
+const exText = o => `${nf.format(o.amount)} ${oc(o)} → ${nf.format(o.toAmount)} ${o.toCur}`;
+const opTitle = o => o.note || o.category || (o.type === 'exchange' ? `Обмен ${oc(o)} → ${o.toCur}` : o.type === 'transfer' ? (o.account === 'card' ? 'Снятие наличных' : 'Внесение на карту') : o.type === 'income' ? (o.owner === 'company' ? 'От компании' : 'Личный доход') : TYPE[o.type]);
+const opSign = o => o.type === 'income' ? 1 : o.type === 'transfer' || o.type === 'exchange' ? 0 : -1;
+const describe = o => `${dmy(o.date)} · ${TYPE[o.type]} · ${o.type === 'exchange' ? exText(o) + ' (' + rateText(o.toAmount / o.amount, oc(o), o.toCur) + ')' : nf.format(o.amount) + ' ' + oc(o)} · ${OWN[o.owner]} · ${accText(o)}${o.category ? ' · ' + o.category : ''}${o.note ? ' · ' + o.note : ''}${o.receipt ? ' · чек' : ''}`;
+const DEV = () => { try { return localStorage.getItem('vj-device') || ''; } catch (e) { return ''; } };
+const log = t => { S.log.push({ at: new Date().toISOString(), t, by: DEV() }); };
 const byDate = (a, b) => a.date.localeCompare(b.date) || (a.createdAt || '').localeCompare(b.createdAt || '');
 
 function parseQuick(text) {
@@ -100,6 +127,7 @@ function parseQuick(text) {
     else if (/^карт/.test(l)) r.account = 'card';
     else if (/^(приш|получ|аванс|поступ)/.test(l)) { r.type = 'income'; if (!ownerSet) r.owner = 'company'; }
     else if (/^сня/.test(l)) r.type = 'transfer';
+    else if (/^(обмен|поменя|купила?\s*вал)/.test(l)) r.type = 'exchange';
     else if (/^верну/.test(l)) r.type = 'return';
     else if (/^(\$|дол|бакс|usd)/.test(l) && curs().includes('$')) r.cur = '$';
     else if (/^(€|евро|eur)/.test(l) && curs().includes('€')) r.cur = '€';
@@ -244,6 +272,7 @@ function deckFromTrip(x) {
 
 /* ================= shared view parts ================= */
 function opRow(o) {
+  if (o.type === 'exchange') return `<button class="item" data-a="editOp" data-id="${o.id}"><span class="dot c">${ic('swap')}</span><span class="mid"><div class="t">${esc(opTitle(o))}</div><div class="s">${OWN[o.owner]} · ${rateText(o.toAmount / o.amount, oc(o), o.toCur)}</div></span><span class="a ex"><b>+${fmt(o.toAmount, o.toCur)}</b><small>−${fmt(o.amount, oc(o))}</small></span></button>`;
   const s = opSign(o), c = o.owner === 'company', ico = o.type === 'income' ? 'in' : o.type === 'transfer' ? 'swap' : o.type === 'return' ? 'out' : c ? 'bag' : 'wallet';
   return `<button class="item" data-a="editOp" data-id="${o.id}"><span class="dot ${c ? 'c' : ''}">${ic(ico)}</span><span class="mid"><div class="t">${esc(opTitle(o))}</div><div class="s">${OWN[o.owner]} · ${accText(o)}${o.receipt ? ' · чек' : ''}</div></span><span class="a ${s > 0 ? 'plus' : ''}">${s > 0 ? '+' : s < 0 ? '−' : ''}${fmt(o.amount, oc(o))}</span></button>`;
 }
@@ -266,6 +295,12 @@ const monthSwitch = () => `<div class="mswitch"><button data-a="month" data-k="-
 const segm = (key, opts) => `<div class="seg">${opts.map(([k, t]) => `<button class="${ui[key] === k ? 'on' : ''}" data-a="seg" data-key="${key}" data-k="${k}">${t}</button>`).join('')}</div>`;
 const head = (title, sub) => `<header class="head"><div><h1 class="title">${title}</h1>${sub ? `<p class="lead">${sub}</p>` : ''}</div><button class="mono" data-a="settings" aria-label="Настройки">VJ</button></header>`;
 
+function ratesCard() {
+  const base = S.profile.currency, other = curs().slice(1).filter(c => code(c) && code(base));
+  if (!other.length) return '';
+  const cells = other.map(c => { const r = rateOf(c, base), cb = rateOf(c, base, 'cb'); return `<div><small>${esc(c)}</small><b>${r ? nf.format(+r.toFixed(r < 10 ? 3 : 2)) : '—'}</b>${cb && code(base) === 'RUB' ? `<em>ЦБ ${nf.format(+cb.toFixed(cb < 10 ? 3 : 2))}</em>` : ''}</div>`; }).join('');
+  return `<button class="rates" data-a="exchange"><div class="rates-h"><span>Курс к ${esc(base)}</span><span>${S.rates && S.rates.at ? 'обновлено ' + new Date(S.rates.mkAt || S.rates.at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) : 'загружается…'} · обменять ${ic('go')}</span></div><div class="rates-v">${cells}</div></button>`;
+}
 /* ================= views ================= */
 const V = {};
 V.home = () => {
@@ -292,6 +327,7 @@ V.home = () => {
       ${bud ? `<div class="bar"><i style="width:${Math.min(100, pOut / bud * 100)}%" class="${pOut > bud ? 'over' : ''}"></i></div><div class="hint">${pOut > bud ? 'бюджет превышен на ' + fmtK(pOut - bud) : 'осталось ' + fmtK(bud - pOut) + ' из бюджета'}</div>` : `<div class="hint">потрачено за месяц ${fmtK(pOut)}</div>`}</button>
     <button class="stat row-stat" data-a="tab" data-tab="assist">${ring(all ? doneT / all : 0, { size: 58, label: all ? `${doneT}/${all}` : '—' })}<div><div class="lbl">Сегодня</div><div class="hint">${agenda.length ? agenda.length + ' ' + plural(agenda.length, 'задача', 'задачи', 'задач') + ' в работе' : all ? 'всё сделано' : 'задач нет'}</div></div></button>
   </div>
+  ${ratesCard()}
   ${nd.length ? `<div class="attn">${nd.map(([i, t1, t2, a]) => `<button class="att" data-a="${a}"><i>${ic(i)}</i><b>${t1}</b><span>${t2}</span></button>`).join('')}</div>` : ''}
   ${agenda.length || trip ? `<div class="sec"><h2>На сегодня</h2><button data-a="tab" data-tab="assist">Все дела</button></div>
     ${trip ? `<button class="trip-mini" data-a="trip" data-id="${trip.id}"><span class="dot c">${ic('plane')}</span><span class="mid"><div class="t">${esc(trip.title)}</div><div class="s">${trip.from ? dayLabel(trip.from) : ''}${trip.place ? ' · ' + esc(trip.place) : ''}</div></span>${ring(trip.check.length ? trip.check.filter(c => c.done).length / trip.check.length : 0, { size: 40, w: 4, label: '' })}</button>` : ''}
@@ -435,13 +471,49 @@ function createSheet() {
   <form class="quick" data-form="smart" style="margin-top:0"><input type="text" name="q" placeholder="такси 3500 компания" autocomplete="off"><button class="icon-btn" aria-label="Распознать">${ic('go')}</button></form>
   <p class="hint">Пишите как в заметках: «такси 3500 компания», «пришло 50000», «завтра 15:00 позвонить в отель !»</p>
   <div class="sec"><h2>Деньги</h2></div>
-  <div class="tiles">${tile('newOp', 'in', 'От компании', 'аванс, перевод', 'data-type="income" data-owner="company"', 'g')}${tile('newOp', 'bag', 'Расход компании', 'с чеком', 'data-type="expense" data-owner="company"', 'g')}${tile('newOp', 'wallet', 'Личный расход', '', 'data-type="expense" data-owner="personal"')}${tile('newOp', 'swap', 'Наличные', 'снять или внести', 'data-type="transfer" data-owner="company"')}</div>
+  <div class="tiles">${tile('newOp', 'in', 'От компании', 'аванс, перевод', 'data-type="income" data-owner="company"', 'g')}${tile('newOp', 'bag', 'Расход компании', 'с чеком', 'data-type="expense" data-owner="company"', 'g')}${tile('newOp', 'wallet', 'Личный расход', '', 'data-type="expense" data-owner="personal"')}${tile('newOp', 'cash', 'Наличные', 'снять или внести', 'data-type="transfer" data-owner="company"')}${tile('exchange', 'swap', 'Обмен валют', 'по актуальному курсу', '', 'g')}${tile('newOp', 'out', 'Вернуть компании', 'остаток денег', 'data-type="return" data-owner="company"')}</div>
   <div class="sec"><h2>Дела</h2></div>
   <div class="tiles three">${tile('editTask', 'spark', 'Задача', '')}${tile('editTrip', 'plane', 'Поездка', '')}${tile('pickDeck', 'slides', 'Презентация', '')}</div>`);
 }
+function exchangeSheet(o = {}) {
+  const cs = curs(), ed = !!o.id;
+  if (cs.length < 2) return sheet(`<h2>Обмен валют</h2><div class="card"><p>Добавьте вторую валюту в настройках: «Имя и валюты» → «Другие валюты», например «$, €».</p></div><button class="btn" style="margin-top:14px" data-a="profile">Открыть настройки</button>`);
+  const from = o.cur || S.profile.currency, to = o.toCur || cs.find(c => c !== from);
+  sheet(`<h2>${ed ? 'Обмен валюты' : 'Обмен валют'}</h2>
+  <form data-form="exch"><input type="hidden" name="id" value="${o.id || ''}">
+    <div class="xbox"><div class="flabel">Отдаю</div><div class="xrow"><input class="amount-in" type="text" inputmode="decimal" name="amount" value="${o.amount || ''}" placeholder="0" autocomplete="off">${select('cur', cs, from)}</div></div>
+    <div class="xswap"><button type="button" data-a="xFlip" aria-label="Поменять местами">${ic('swap')}</button></div>
+    <div class="xbox"><div class="flabel">Получаю</div><div class="xrow"><input class="amount-in" type="text" inputmode="decimal" name="toAmount" value="${o.toAmount || ''}" placeholder="0" autocomplete="off">${select('toCur', cs, to)}</div></div>
+    <div class="card xinfo" id="xinfo"></div>
+    <div class="flabel" style="margin-top:14px">Чьи деньги</div>${radio('owner', [['company', 'Компании'], ['personal', 'Личные']], o.owner || 'company')}
+    <div class="row"><div style="flex:1"><div class="flabel" style="margin-top:14px">Откуда</div>${radio('account', [['card', 'Карта'], ['cash', 'Нал.']], o.account || 'cash')}</div><div style="flex:1"><div class="flabel" style="margin-top:14px">Куда</div>${radio('toAccount', [['card', 'Карта'], ['cash', 'Нал.']], o.toAccount || 'cash')}</div></div>
+    <label class="f"><span>Где меняли</span><input type="text" name="note" value="${esc(o.note || '')}" placeholder="Банк, обменник"></label>
+    <div class="row"><label class="f"><span>Дата</span><input type="date" name="date" value="${o.date || today()}"></label>
+    <label class="f"><span>Чек</span><span class="file-btn">${ic('plus')} ${o.receipt ? 'Заменить' : 'Фото чека'}<input type="file" name="receipt" accept="image/*"></span></label></div>
+    ${o.receipt ? `<img class="rcpt" src="${o.receipt}" alt="Чек">` : ''}
+    <button class="btn" style="margin-top:20px">Сохранить обмен</button>
+    ${ed ? `<button type="button" class="btn danger" style="margin-top:10px" data-a="delOp" data-id="${o.id}">Удалить</button>` : ''}
+  </form>`);
+  xUpdate();
+  getRates().then(() => xUpdate());
+}
+function xUpdate() {
+  const f = $('form[data-form=exch]'), box = $('#xinfo'); if (!f || !box) return;
+  const a = num(f.amount.value), b = num(f.toAmount.value), from = f.cur.value, to = f.toCur.value;
+  if (from === to) { box.innerHTML = '<p class="red">Выберите разные валюты</p>'; return; }
+  const mk = rateOf(from, to), cb = rateOf(from, to, 'cb'), mine = a > 0 && b > 0 ? b / a : null, R = S.rates || {};
+  const diff = mine && mk ? (mine / mk - 1) * 100 : null;
+  box.innerHTML = `${mine ? `<div class="kv"><span>Ваш курс</span><b>${rateText(mine, from, to)}</b></div>` : ''}
+    <div class="kv"><span>Рыночный</span><b>${rateText(mk, from, to)}</b></div>
+    ${cb ? `<div class="kv"><span>ЦБ РФ${R.cbAt ? ' на ' + new Date(R.cbAt).toLocaleDateString('ru-RU') : ''}</span><b>${rateText(cb, from, to)}</b></div>` : ''}
+    ${diff !== null ? `<div class="kv"><span>Разница с рынком</span><b class="${diff < -1.5 ? 'red' : ''}">${diff > 0 ? '+' : ''}${diff.toFixed(2).replace('.', ',')}%${a ? ' · ' + (diff < 0 ? 'потеря ' : 'выгода ') + fmt(Math.abs(b - a * mk), to) : ''}</b></div>` : ''}
+    <div class="xbtns">${mk && a ? `<button type="button" class="btn ghost sm" data-a="xFill" data-src="mk">По рынку</button>` : ''}${cb && a ? `<button type="button" class="btn ghost sm" data-a="xFill" data-src="cb">По ЦБ</button>` : ''}<button type="button" class="btn ghost sm" data-a="xRefresh">${ic('swap')} Обновить</button></div>
+    <p class="note" style="margin-top:6px">${R.mkAt ? 'Рынок: ' + new Date(R.mkAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) + ', open.er-api.com. ' : 'Курсы недоступны без интернета. '}Введите сумму, которую реально получили: она и попадёт в учёт.</p>`;
+}
 function opSheet(o = {}) {
+  if (o.type === 'exchange' && !(o.id && S.closed[o.date.slice(0, 7)])) return exchangeSheet(o);
   const ed = !!o.id, locked = ed && S.closed[o.date.slice(0, 7)];
-  if (locked) return sheet(`<h2>${esc(opTitle(o))}</h2><div class="card">${[['Дата', dmy(o.date)], ['Тип', TYPE[o.type]], ['Сумма', fmt(o.amount, oc(o))], ['Чьи деньги', OWN[o.owner]], ['Счёт', accText(o)], ['Категория', o.category || '—'], ['Комментарий', o.note || '—']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>${o.receipt ? `<img class="rcpt" src="${o.receipt}" alt="Чек">` : ''}<p class="note">Месяц закрыт: операция хранится в архиве без изменений.</p>`);
+  if (locked) return sheet(`<h2>${esc(opTitle(o))}</h2><div class="card">${[['Дата', dmy(o.date)], ['Тип', TYPE[o.type]], ['Сумма', o.type === 'exchange' ? exText(o) : fmt(o.amount, oc(o))], ['Чьи деньги', OWN[o.owner]], ['Счёт', accText(o)], ['Категория', o.category || '—'], ['Комментарий', o.note || '—']].map(([k, v]) => `<div class="kv"><span>${k}</span><b>${esc(v)}</b></div>`).join('')}</div>${o.receipt ? `<img class="rcpt" src="${o.receipt}" alt="Чек">` : ''}<p class="note">Месяц закрыт: операция хранится в архиве без изменений.</p>`);
   const type = o.type || 'expense', owner = o.owner || 'company';
   sheet(`<h2>${ed ? 'Операция' : 'Новая операция'}</h2>
   <form data-form="op" data-type="${type}" data-owner="${owner}">
@@ -474,10 +546,12 @@ function reconSheet() {
 }
 function reportData(m) {
   const before = S.ops.filter(o => o.date < m + '-01'), ops = S.ops.filter(o => o.date.slice(0, 7) === m).sort(byDate);
-  const per = curs().concat([...new Set(ops.map(oc))].filter(c => !curs().includes(c))).map(cur => {
-    const mine = ops.filter(o => oc(o) === cur), sum = f => mine.filter(f).reduce((s, o) => s + o.amount, 0), cats = {};
+  const used = [...new Set(ops.map(oc).concat(ops.filter(o => o.toCur).map(o => o.toCur)))];
+  const per = curs().concat(used.filter(c => !curs().includes(c))).map(cur => {
+    const mine = ops.filter(o => oc(o) === cur && o.type !== 'exchange'), sum = f => mine.filter(f).reduce((s, o) => s + o.amount, 0), cats = {};
+    const exOut = ops.filter(o => o.type === 'exchange' && oc(o) === cur).reduce((s, o) => s + o.amount, 0), exIn = ops.filter(o => o.type === 'exchange' && o.toCur === cur).reduce((s, o) => s + o.toAmount, 0);
     mine.filter(o => o.type === 'expense' && o.owner === 'company').forEach(o => cats[o.category || 'Прочее'] = (cats[o.category || 'Прочее'] || 0) + o.amount);
-    return { cur, n: mine.length, open: balances(before, cur), close: balances(before.concat(ops), cur), cats, cIn: sum(o => o.type === 'income' && o.owner === 'company'), cOut: sum(o => o.type === 'expense' && o.owner === 'company'), cRet: sum(o => o.type === 'return'), pIn: sum(o => o.type === 'income' && o.owner === 'personal'), pOut: sum(o => o.type === 'expense' && o.owner === 'personal') };
+    return { cur, n: mine.length + (exOut || exIn ? 1 : 0), exOut, exIn, open: balances(before, cur), close: balances(before.concat(ops), cur), cats, cIn: sum(o => o.type === 'income' && o.owner === 'company'), cOut: sum(o => o.type === 'expense' && o.owner === 'company'), cRet: sum(o => o.type === 'return'), pIn: sum(o => o.type === 'income' && o.owner === 'personal'), pOut: sum(o => o.type === 'expense' && o.owner === 'personal') };
   }).filter((p, i) => i === 0 || p.n || p.open.company || p.open.personal);
   return { ops, per };
 }
@@ -490,16 +564,17 @@ function showReport(m) {
   ${d.per.map(p => (FC = p.cur, `<h2>Деньги компании, ${esc(p.cur)}</h2><table>
     <tr><td>Остаток на начало месяца</td><td class="n">${fmt(p.open.company)}</td></tr><tr><td>Получено от компании</td><td class="n">+${fmt(p.cIn)}</td></tr>
     <tr><td>Потрачено на нужды компании</td><td class="n">−${fmt(p.cOut)}</td></tr><tr><td>Возвращено компании</td><td class="n">−${fmt(p.cRet)}</td></tr>
+    ${p.exOut || p.exIn ? `<tr><td>Обмен валюты (все деньги): продано / куплено</td><td class="n">−${fmt(p.exOut)} / +${fmt(p.exIn)}</td></tr>` : ''}
     <tr><td><b>Остаток на конец месяца</b> (карта ${fmt(p.close.card.company)}, наличные ${fmt(p.close.cash.company)})</td><td class="n"><b>${fmt(p.close.company)}</b></td></tr></table>
   ${Object.keys(p.cats).length ? `<h2>Расходы компании по статьям, ${esc(p.cur)}</h2><table>${Object.entries(p.cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="n">${fmt(v)}</td></tr>`).join('')}</table>` : ''}
   <h2>Личные деньги, ${esc(p.cur)}</h2><table><tr><td>Остаток на начало</td><td class="n">${fmt(p.open.personal)}</td></tr><tr><td>Поступило</td><td class="n">+${fmt(p.pIn)}</td></tr><tr><td>Потрачено</td><td class="n">−${fmt(p.pOut)}</td></tr><tr><td><b>Остаток на конец</b></td><td class="n"><b>${fmt(p.close.personal)}</b></td></tr></table>`)).join('')}${(FC = null, '')}
   <h2>Все операции (${d.ops.length})</h2><table><tr><th>№</th><th>Дата</th><th>Операция</th><th>Чьи</th><th>Счёт</th><th>Комментарий</th><th>Чек</th><th class="n">Сумма</th></tr>
-  ${d.ops.map((o, i) => `<tr><td>${i + 1}</td><td>${dmy(o.date)}</td><td>${TYPE[o.type]}${o.category ? '<br>' + esc(o.category) : ''}</td><td>${OWN[o.owner]}</td><td>${accText(o)}</td><td>${esc(o.note || '')}${o.tripId ? '<br><i>' + esc(trip(o.tripId)) + '</i>' : ''}</td><td>${o.receipt ? 'есть' : '—'}</td><td class="n">${opSign(o) > 0 ? '+' : opSign(o) < 0 ? '−' : ''}${nf.format(o.amount)} ${esc(oc(o))}</td></tr>`).join('')}</table>
+  ${d.ops.map((o, i) => `<tr><td>${i + 1}</td><td>${dmy(o.date)}</td><td>${TYPE[o.type]}${o.category ? '<br>' + esc(o.category) : ''}</td><td>${OWN[o.owner]}</td><td>${accText(o)}</td><td>${esc(o.note || '')}${o.tripId ? '<br><i>' + esc(trip(o.tripId)) + '</i>' : ''}</td><td>${o.receipt ? 'есть' : '—'}</td><td class="n">${o.type === 'exchange' ? esc(exText(o)) + '<br><small>' + esc(rateText(o.toAmount / o.amount, oc(o), o.toCur)) + (o.market ? ', рынок ' + esc(rateText(o.market, oc(o), o.toCur)) : '') + '</small>' : (opSign(o) > 0 ? '+' : opSign(o) < 0 ? '−' : '') + nf.format(o.amount) + ' ' + esc(oc(o))}</td></tr>`).join('')}</table>
   ${rc.length ? `<h2>Приложение: чеки (${rc.length})</h2><div class="rc">${rc.map(o => `<figure><img src="${o.receipt}" alt=""><figcaption>№ ${d.ops.indexOf(o) + 1} · ${dmy(o.date)} · ${nf.format(o.amount)} ${esc(oc(o))} · ${esc(opTitle(o))}</figcaption></figure>`).join('')}</div>` : ''}</div>`);
 }
 function csv(m) {
   const d = reportData(m), q = s => '"' + String(s ?? '').replace(/"/g, '""') + '"';
-  const rows = [['Дата', 'Тип', 'Чьи деньги', 'Счёт', 'Категория', 'Сумма', 'Валюта', 'Комментарий', 'Чек', 'Поездка']].concat(d.ops.map(o => [dmy(o.date), TYPE[o.type], OWN[o.owner], accText(o), o.category || '', String((opSign(o) || 1) * o.amount).replace('.', ','), oc(o), o.note || '', o.receipt ? 'есть' : 'нет', (S.trips.find(t => t.id === o.tripId) || {}).title || '']));
+  const rows = [['Дата', 'Тип', 'Чьи деньги', 'Счёт', 'Категория', 'Сумма', 'Валюта', 'Комментарий', 'Чек', 'Поездка']].concat(d.ops.map(o => [dmy(o.date), TYPE[o.type], OWN[o.owner], accText(o), o.category || '', String((opSign(o) || 1) * o.amount).replace('.', ','), oc(o), (o.type === 'exchange' ? 'получено ' + nf.format(o.toAmount) + ' ' + o.toCur + '; ' : '') + (o.note || ''), o.receipt ? 'есть' : 'нет', (S.trips.find(t => t.id === o.tripId) || {}).title || '']));
   rows.push([]); d.per.forEach(p => rows.push(['Остаток денег компании на конец', '', '', '', '', String(p.close.company).replace('.', ','), p.cur], ['Остаток личных на конец', '', '', '', '', String(p.close.personal).replace('.', ','), p.cur]));
   saveFile(`otchet-${m}.csv`, '﻿' + rows.map(r => r.map(q).join(';')).join('\r\n'), 'text/csv');
 }
@@ -531,7 +606,7 @@ function settingsSheet() {
   const it = (a, ico, t, s) => `<button class="item" data-a="${a}"><span class="dot">${ic(ico)}</span><span class="mid"><div class="t">${t}</div>${s ? `<div class="s">${s}</div>` : ''}</span>${ic('go')}</button>`;
   sheet(`<div class="prof"><div class="mono big">VJ</div><div><h2 style="margin:0">${esc(S.profile.name)}</h2><p class="lead" style="margin:0">Личный кабинет</p></div></div>
   <div class="sec"><h2>Профиль</h2></div><div class="list">${it('profile', 'user', 'Имя и валюты', esc(curs().join(' · ')))}${it('budget', 'chart', 'Бюджет на месяц', S.profile.budget ? fmt(S.profile.budget) : 'не задан')}${it('pin', 'lock', 'PIN-код', S.profile.pin ? 'включён' : 'выключен')}</div>
-  <div class="sec"><h2>Контроль</h2></div><div class="list">${it('reminders', 'bell', 'Напоминания в календарь', 'операции, сверка, закрытие месяца')}${it('recon', 'swap', 'Сверка с банком', '')}${it('showLog', 'list', 'Журнал изменений', 'записей: ' + S.log.length)}</div>
+  <div class="sec"><h2>Контроль</h2></div><div class="list">${it('reminders', 'bell', 'Напоминания в календарь', 'операции, сверка, закрытие месяца')}${it('recon', 'swap', 'Сверка с банком', '')}${it('showLog', 'list', 'Журнал изменений', 'записей: ' + S.log.length)}${it('device', 'user', 'Подпись устройства', DEV() || 'не задана')}${it('exchange', 'swap', 'Обмен валют и курсы', '')}</div>
   <div class="sec"><h2>Данные</h2></div><div class="list">${window.FIREBASE_CONFIG ? it('cloud', 'archive', 'Облако', Cloud.status()) : ''}${it('backup', 'copy', 'Сохранить резервную копию', S.lastBackup ? 'последняя ' + new Date(S.lastBackup).toLocaleDateString('ru-RU') : 'ещё не сохранялась')}
     <label class="item"><span class="dot">${ic('in')}</span><span class="mid"><div class="t">Восстановить из копии</div><div class="s">заменит текущие данные</div></span>${ic('go')}<input type="file" accept=".json,application/json" data-c="restore" hidden></label></div>
   <p class="note" style="text-align:center">VJ · версия 2.0</p>`);
@@ -568,7 +643,7 @@ const A = {
   closeReport() { $('#report').hidden = true; $('#report').innerHTML = ''; const st = $('#pagestyle'); if (st) st.remove(); document.documentElement.classList.remove('modal'); },
   print() { window.print(); }, csv(d) { csv(d.m); },
   async closeMonth(d) { if (!confirm(`Закрыть ${monthName(d.m)}? После этого операции месяца нельзя будет изменить или удалить.`)) return; const ops = S.ops.filter(o => o.date.slice(0, 7) === d.m).sort(byDate); S.closed[d.m] = { at: new Date().toISOString(), hash: await opsDigest(ops), count: ops.length }; log(`Закрыт месяц ${monthName(d.m)}: операций ${ops.length}, код ${S.closed[d.m].hash.slice(0, 12)}…`); save(); render(); toast('Месяц закрыт'); },
-  showLog() { sheet(`<h2>Журнал изменений</h2>${S.log.length ? `<div class="list">${[...S.log].reverse().slice(0, 200).map(l => `<div class="item"><span class="mid"><div class="s">${new Date(l.at).toLocaleString('ru-RU')}</div><div class="wrap-t">${esc(l.t)}</div></span></div>`).join('')}</div>` : '<div class="empty">Записей пока нет.</div>'}`); },
+  showLog() { sheet(`<h2>Журнал изменений</h2>${S.log.length ? `<div class="list">${[...S.log].reverse().slice(0, 200).map(l => `<div class="item"><span class="mid"><div class="s">${new Date(l.at).toLocaleString('ru-RU')}${l.by ? ' · ' + esc(l.by) : ''}</div><div class="wrap-t">${esc(l.t)}</div></span></div>`).join('')}</div>` : '<div class="empty">Записей пока нет.</div>'}`); },
   reminders() { sheet(`<h2>Напоминания</h2><p class="lead">Откроется событие для календаря айфона. Добавьте его, и календарь будет напоминать сам.</p><div class="list">
     <button class="item" data-a="ics" data-k="day"><span class="dot">${ic('clock')}</span><span class="mid"><div class="t">Каждый вечер в 20:00</div><div class="s">внести операции за день</div></span>${ic('cal')}</button>
     <button class="item" data-a="ics" data-k="week"><span class="dot">${ic('swap')}</span><span class="mid"><div class="t">Каждое воскресенье</div><div class="s">сверить остаток с банком</div></span>${ic('cal')}</button>
@@ -620,6 +695,11 @@ const A = {
   delTpl(d) { S.templates = S.templates.filter(t => t.id !== d.id); save(); closeSheet(); render(); },
   async copyTpl(d) { const x = S.templates.find(t => t.id === d.id); try { await navigator.clipboard.writeText(x.body); toast('Текст скопирован'); } catch (e) { toast('Не удалось скопировать'); } },
   key(d) { lockKey(d.k); },
+  exchange() { exchangeSheet(); },
+  xFlip() { const f = $('form[data-form=exch]'); const c = f.cur.value; f.cur.value = f.toCur.value; f.toCur.value = c; const a = f.amount.value; f.amount.value = f.toAmount.value; f.toAmount.value = a; xUpdate(); },
+  xFill(d) { const f = $('form[data-form=exch]'), r = rateOf(f.cur.value, f.toCur.value, d.src); if (r) { f.toAmount.value = String(Math.round(num(f.amount.value) * r * 100) / 100).replace('.', ','); xUpdate(); } },
+  async xRefresh() { toast('Обновляю курсы…'); await getRates(true); xUpdate(); render(); toast(S.rates && S.rates.mk ? 'Курсы обновлены' : 'Нет связи с сервером курсов'); },
+  device() { sheet(`<h2>Подпись устройства</h2><p class="lead">Имя появится в журнале рядом с каждым изменением, сделанным с этого телефона. Так видно, кто что поправил.</p><form data-form="device"><label class="f"><span>Это устройство</span><input type="text" name="n" value="${esc(DEV())}" placeholder="Например: телефон Виолетты"></label><button class="btn" style="margin-top:18px">Сохранить</button></form>`); },
   fix(d) { const v = +d.d; opSheet({ type: v > 0 ? 'income' : 'expense', owner: 'company', account: d.acc, amount: Math.abs(v) }); }
 };
 const F = {
@@ -632,8 +712,20 @@ const F = {
     const q = fd.get('q').trim(); if (!q) return;
     const taskLike = /^(задача|напомни)/i.test(q) || /\d{1,2}:\d{2}/.test(q) || /(^|\s)(сегодня|завтра|послезавтра|понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье)(\s|$)/i.test(q) || !/\d/.test(q);
     if (taskLike) { const r = parseTask(q); if (!r.title) return; S.tasks.push({ id: uid(), done: false, ...r }); save(); closeSheet(); ui.tab = 'assist'; ui.as = 'list'; render(); toast('Задача добавлена' + (r.due ? ' · ' + dayLabel(r.due).toLowerCase() : '')); }
-    else opSheet(parseQuick(q));
+    else { const r = parseQuick(q); r.type === 'exchange' ? exchangeSheet({ amount: r.amount, cur: r.cur, owner: r.owner }) : opSheet(r); }
   },
+  async exch(fd) {
+    const amount = num(fd.get('amount')), toAmount = num(fd.get('toAmount')), cur = fd.get('cur'), toCur = fd.get('toCur'), date = fd.get('date') || today(), id = fd.get('id');
+    if (!(amount > 0) || !(toAmount > 0)) return toast('Введите обе суммы'); if (cur === toCur) return toast('Выберите разные валюты');
+    if (S.closed[date.slice(0, 7)]) return toast('Этот месяц уже закрыт');
+    const o = { type: 'exchange', date, amount, cur, toAmount, toCur, owner: fd.get('owner'), account: fd.get('account'), toAccount: fd.get('toAccount'), note: fd.get('note').trim(), market: rateOf(cur, toCur), cbRate: rateOf(cur, toCur, 'cb') };
+    const i = id ? S.ops.findIndex(x => x.id === id) : -1, old = S.ops[i], file = fd.get('receipt');
+    if (file && file.size) o.receipt = await compress(file); else if (old && old.receipt) o.receipt = old.receipt;
+    if (old) { S.ops[i] = { ...o, id, createdAt: old.createdAt, updatedAt: new Date().toISOString() }; log('Изменён обмен. Было: ' + describe(old) + '. Стало: ' + describe(o)); }
+    else { S.ops.push({ ...o, id: uid(), createdAt: new Date().toISOString() }); log('Добавлен обмен: ' + describe(o)); }
+    ui.month = date.slice(0, 7); save(); closeSheet(); render(); toast('Обмен сохранён');
+  },
+  device(fd) { try { localStorage.setItem('vj-device', fd.get('n').trim()); } catch (e) { } closeSheet(); toast('Сохранено'); },
   taskQuick(fd) { const q = fd.get('q').trim(); if (!q) return; const r = parseTask(q); if (!r.title) return; S.tasks.push({ id: uid(), done: false, ...r }); save(); render(); toast('Добавлено' + (r.due ? ' · ' + dayLabel(r.due).toLowerCase() : '') + (r.time ? ' в ' + r.time : '')); },
   async op(fd) {
     const amount = num(fd.get('amount')); if (!(amount > 0)) return toast('Введите сумму');
@@ -682,6 +774,7 @@ document.addEventListener('submit', e => { const f = e.target.closest('[data-for
 document.addEventListener('input', e => {
   const t = e.target;
   if (t.dataset.c === 'q') { ui.q = t.value; const pos = t.selectionStart; render(); const n = $('[data-c=q]'); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (er) { } } return; }
+  if (t.closest('form[data-form=exch]')) { xUpdate(); return; }
   const f = t.closest('form[data-form=slide]');
   if (f) {
     const d = curDeck(), i = +f.dataset.i, s = d && d.slides[i]; if (!s) return;
@@ -692,6 +785,7 @@ document.addEventListener('input', e => {
 });
 document.addEventListener('change', e => {
   const t = e.target, f = t.closest('form[data-form=op]');
+  if (t.closest('form[data-form=exch]') && (t.name === 'cur' || t.name === 'toCur')) xUpdate();
   if (f && t.name === 'type') f.dataset.type = t.value;
   if (f && t.name === 'owner') f.dataset.owner = t.value;
   if (t.name === 'receipt' && t.files[0]) { const b = t.closest('.file-btn'); if (b) b.firstChild.nextSibling.textContent = ' Выбрано'; }
@@ -722,5 +816,6 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) { DB.
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => { });
   render(); if (S.profile.pin) showLock();
   if (window.Cloud) Cloud.init();
+  if (S.profile.ready && curs().length > 1) getRates().then(() => { if (ui.tab === 'home' && $('#sheet').hidden) render(); });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => { });
 })();

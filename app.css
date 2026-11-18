@@ -204,6 +204,27 @@ form .seg:first-child{margin-top:0}
 .mswitch b{flex:1;text-align:center;text-transform:capitalize;font-weight:700}
 .recon-card{display:flex;align-items:center;gap:12px;justify-content:space-between;margin-top:16px}
 
+/* exchange */
+.rates{display:block;width:100%;margin-top:12px;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:13px 16px;box-shadow:var(--shadow-s);text-align:left}
+.rates-h{display:flex;justify-content:space-between;align-items:center;font-size:11.5px;color:var(--muted);letter-spacing:.04em}
+.rates-h span:last-child{display:flex;align-items:center;gap:2px;color:var(--em);font-weight:600}
+.rates-h svg{width:15px;height:15px}
+.rates-v{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px;margin-top:8px}
+.rates-v small{display:block;font-size:12px;color:var(--muted);font-weight:600}
+.rates-v b{font-family:var(--serif);font-size:24px;font-weight:600;line-height:1.1}
+.rates-v em{display:block;font-style:normal;font-size:11px;color:var(--muted)}
+.xbox{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:12px 12px 12px}
+.xrow{display:flex;gap:8px}
+.xrow .amount-in{flex:1;min-width:0;text-align:left;border:0;background:transparent;padding:6px 4px!important;min-height:44px}
+.xrow select{width:96px;flex:none;text-align:center;font-weight:700}
+.xswap{display:flex;justify-content:center;margin:-10px 0;position:relative;z-index:1}
+.xswap button{width:40px;height:40px;border-radius:50%;background:var(--em);color:var(--gold-soft);display:grid;place-items:center;transform:rotate(90deg);border:3px solid var(--bg)}
+.xinfo{margin-top:12px;padding:10px 14px}
+.xbtns{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.item .a.ex{display:flex;flex-direction:column;align-items:flex-end;line-height:1.15}
+.item .a.ex b{font-weight:600;color:var(--em)}
+.item .a.ex small{font-family:var(--sans);font-size:11.5px;color:var(--muted);font-weight:500}
+
 /* tiles */
 .tiles{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .tiles.three{grid-template-columns:repeat(3,1fr)}
